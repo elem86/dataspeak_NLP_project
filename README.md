@@ -9,11 +9,11 @@ This Python script is designed to clean and preprocess datasets, particularly fo
 The script performs the following tasks:
 - Loads datasets and handles encoding issues.
 - Cleans text data by:
--     Encoding <code> and </code> tags to preserve code snippets.
--     Optionally encoding URLs.
--     Removing other HTML tags.
--     Replacing newline and tab characters with spaces.
--     Keeping punctuation and special characters.
+    - Encoding <code> and </code> tags to preserve code snippets.
+    - Optionally encoding URLs.
+    - Removing other HTML tags.
+    - Replacing newline and tab characters with spaces.
+    - Keeping punctuation and special characters.
 - Applies cleaning functions in parallel to enhance efficiency using multiprocessing.
 - Converts columns to appropriate data types and handles missing values.
 - Merges DataFrames to create a consolidated dataset.
