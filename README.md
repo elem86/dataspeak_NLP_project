@@ -1,4 +1,4 @@
-# Dataspeak NLP project using BERT
+# Dataspeak NLP project using GPT2
 
 ## Data Cleaning Script
 
@@ -8,10 +8,18 @@ This Python script is designed to clean and preprocess datasets, particularly fo
 
 The script performs the following tasks:
 - Loads datasets and handles encoding issues.
-- Cleans text data by removing URLs, HTML tags, non-alphanumeric characters, and performs lemmatization and stop word removal using Spacy.
-- Applies cleaning functions in parallel to enhance efficiency.
+- Cleans text data by:
+-     Encoding <code> and </code> tags to preserve code snippets.
+-     Optionally encoding URLs.
+-     Removing other HTML tags.
+-     Replacing newline and tab characters with spaces.
+-     Keeping punctuation and special characters.
+- Applies cleaning functions in parallel to enhance efficiency using multiprocessing.
 - Converts columns to appropriate data types and handles missing values.
 - Merges DataFrames to create a consolidated dataset.
+- Filters out answers with a score of 0 and below.
+- Merges title and body for questions.
+- Creates a context by combining the merged title and body of the question and body of the answer.
 - Saves the cleaned and processed datasets.
 
 #### Dependencies
@@ -21,6 +29,7 @@ The script performs the following tasks:
 - spacy
 - multiprocessing
 - tqdm
+- string
 
 #### How to Run
 
@@ -33,11 +42,13 @@ $ python data_cleaning.py
 ```
 
 ### Code Structure
+The script is structured into several sections, including importing libraries, defining cleaning functions, parallel cleaning, and the main function for execution. The cleaning function is designed to handle various text elements like HTML tags and URLs, while the parallel cleaning function utilizes multiprocessing to expedite the cleaning process. The main function orchestrates the loading, cleaning, merging, and saving of datasets.
 
 #### Importing Libraries
 ```python
 import pandas as pd
 import re
+import string
 import spacy
 from multiprocessing import Pool
 from tqdm import tqdm
@@ -50,13 +61,23 @@ nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
 #### Defining Cleaning Function
 ```python
 def clean_text(text):
-    text = re.sub(r"http[s]?://\S+", "", text)
+    # Encode <code> and </code> tags
+    text = re.sub(r"<code>", "[CODE]", text)
+    text = re.sub(r"</code>", "[/CODE]", text)
+
+    # Optional: Encode URLs
+    text = re.sub(r"(http[s]?://\S+)", "[URL]", text)
+
+    # Remove other HTML tags
     text = re.sub(r"<.*?>", "", text)
-    text = re.sub(r"\r\n|\n|\t", "", text)
-    text = re.sub(r"[^a-zA-Z0-9\s]", "", text)
-    doc = nlp(text)
-    words = [token.lemma_ for token in doc if not token.is_stop]
-    return " ".join(words)
+
+    # Replace newline and tab characters with spaces
+    text = re.sub(r"\r\n|\n|\t", " ", text)
+
+    # Keep punctuation and special characters
+    text = re.sub(r"[^a-zA-Z0-9\s" + string.punctuation + "]", "", text)
+
+    return text
 ```
 
 #### Parallel Cleaning
@@ -71,52 +92,66 @@ def parallel_clean(df, column_name):
 def main():
     answers = pd.read_csv("Answers.csv", encoding="ISO-8859-1")
     questions = pd.read_csv("Questions.csv", encoding="ISO-8859-1")
-    tags = pd.read_csv("Tags.csv", encoding="ISO-8859-1")
-    
+
     # Preprocessing steps
     def preprocess(df):
         df = df.dropna()
         df = df.drop_duplicates()
         return df
-    
+
     answers = preprocess(answers)
     questions = preprocess(questions)
-    tags = preprocess(tags)
-    
-    # Convert columns to appropriate data types
-    answers["CreationDate"] = pd.to_datetime(answers["CreationDate"])
-    questions["CreationDate"] = pd.to_datetime(questions["CreationDate"])
-    answers["OwnerUserId"] = answers["OwnerUserId"].fillna(0).astype(int)
-    questions["OwnerUserId"] = questions["OwnerUserId"].fillna(0).astype(int)
-    
+
     # Applying cleaning 'Body' and 'Title' columns of questions and answers datasets in parallel
     questions["Cleaned_Body"] = parallel_clean(questions, "Body")
     answers["Cleaned_Body"] = parallel_clean(answers, "Body")
     questions["Cleaned_Title"] = parallel_clean(questions, "Title")
-    
+
     # Drop unnecessary columns
     answers = answers.drop("Body", axis=1)
     questions = questions.drop(["Body", "Title"], axis=1)
-    
+
     # Merging DataFrames
-    tags = tags.groupby("Id")["Tag"].agg(", ".join).reset_index()
-    questions_tags_merged = questions.merge(tags, left_on="Id", right_on="Id", how="left")
-    qa_merged = questions_tags_merged.merge(answers, left_on="Id", right_on="ParentId", how="left", suffixes=("_question", "_answer"))
-    
-    # Drop unnecessary columns and rows
-    qa_merged = qa_merged.dropna(subset=["Cleaned_Body_question", "Cleaned_Title", "Tag", "Cleaned_Body_answer"])
+    qa_merged = questions.merge(
+        answers,
+        left_on="Id",
+        right_on="ParentId",
+        how="left",
+        suffixes=("_question", "_answer"),
+    )
+
+    # Filter out answers with Score_answer 0 and below
+    qa_merged = qa_merged[
+        qa_merged.get("Score_answer", 1) > 0
+    ]  # Assuming Score_answer is the column name for the answer score
+
+    # Merge title and body for questions
+    qa_merged["Title_Body_Q"] = (
+        qa_merged["Cleaned_Title"] + " \n\n " + qa_merged["Cleaned_Body_question"]
+    )
+
+    # Drop unnecessary columns
     qa_merged = qa_merged.reset_index(drop=True)
-    
-    # Create BERT_Context by combining cleaned body of the question and body of the answer
-    qa_merged["BERT_Context"] = qa_merged["Cleaned_Body_question"] + " " + qa_merged["Cleaned_Body_answer"]
-    
+
+    # Create Context by combining merged title and body of the question and body of the answer
+    qa_merged["Context"] = (
+        qa_merged["Title_Body_Q"] + " " + qa_merged["Cleaned_Body_answer"]
+    )
+
+    # Keep only the specified columns
+    columns_to_keep = [
+        "Id_question",
+        "Title_Body_Q",
+        "Id_answer",
+        "ParentId",
+        "Cleaned_Body_answer",
+        "Context",
+    ]
+    qa_merged = qa_merged[columns_to_keep]
+
     # Saving the cleaned datasets
-    qa_merged.to_csv("QA_cleaned.csv", index=False)
-    print("QA_cleaned.csv saved!")
-    answers.to_csv("Answers_cleaned.csv", index=False)
-    print("Answers_cleaned.csv saved!")
-    questions.to_csv("Questions_cleaned.csv", index=False)
-    print("Questions_cleaned.csv saved!")
+    qa_merged.to_csv("QA_ready.csv", index=False)
+    print("QA_ready.csv saved!")
 ```
 
 #### Execution
@@ -125,323 +160,842 @@ if __name__ == "__main__":
     main()
 ```
 
-
-## Preprocessing Script
-
-### Overview
-This script is responsible for preprocessing the QA_cleaned.csv dataset. It calculates the start and end positions of the answer in the context and adds these positions to the dataframe. The preprocessed data is then saved as preprocessed_data.csv.
-
-#### Importing Libraries
-```python
-import pandas as pd
-from transformers import BertTokenizer
-from tqdm import tqdm
-```
-
-#### Loading Dataset and Initializing Tokenizer
-```python
-data_path = "QA_cleaned.csv"
-data = pd.read_csv(data_path)
-
-tokenizer = BertTokenizer.from_pretrained("bert-large-uncased-whole-word-masking-finetuned-squad")
-```
-
-#### Function to Find Start and End Positions
-```python
-def find_start_end_positions(context, answer):
-    context_tokens = tokenizer.tokenize(context)
-    answer_tokens = tokenizer.tokenize(answer)
-    
-    for i in range(len(context_tokens) - len(answer_tokens) + 1):
-        if context_tokens[i : i + len(answer_tokens)] == answer_tokens:
-            return i, i + len(answer_tokens) - 1
-    
-    return 0, 0
-```
-
-#### Calculating Start and End Positions
-```python
-start_positions = []
-end_positions = []
-
-for index, row in tqdm(data.iterrows(), total=data.shape[0], desc="Processing rows"):
-    context = row["BERT_Context"]
-    answer = row["Cleaned_Body_answer"]
-    
-    if not isinstance(context, str) or not isinstance(answer, str):
-        start_positions.append(0)
-        end_positions.append(0)
-        continue
-    
-    start_idx, end_idx = find_start_end_positions(context, answer)
-    start_positions.append(start_idx)
-    end_positions.append(end_idx)
-```
-
-#### Adding Positions to DataFrame and Saving
-```python
-data["Start_Positions"] = start_positions
-data["End_Positions"] = end_positions
-
-data["Start_Positions"] = data["Start_Positions"].astype(int)
-data["End_Positions"] = data["End_Positions"].astype(int)
-
-data.to_csv("preprocessed_data.csv", index=False)
-```
-
-#### Execution
-To execute the script, simply run it in a Python environment that has access to the required libraries and the input dataset. The output will be saved as preprocessed_data.csv in the same directory as the script.
-
-
-
-## Verifying Script
+## GPT2 Model Training Notebook
 
 ### Overview
-This script is designed to verify the correctness of the preprocessed data by extracting answers from the context using the calculated start and end positions and comparing them with the actual answers. It randomly selects rows from the preprocessed data and prints the context, answer, and extracted answer for manual verification.
-
-#### Importing Libraries
-```python
-import pandas as pd
-from transformers import BertTokenizer
-import random
-```
-
-#### Loading Preprocessed Data and Initializing Tokenizer
-```python
-data = pd.read_csv("preprocessed_data.csv")
-
-tokenizer = BertTokenizer.from_pretrained("bert-large-uncased-whole-word-masking-finetuned-squad")
-```
-
-#### Selecting Rows to Check and Extracting Answers
-```python
-num_rows_to_check = 10  # You can change this to the number of rows you want to check
-rows_to_check = random.sample(range(len(data)), num_rows_to_check)
-
-for row_idx in rows_to_check:
-    row = data.iloc[row_idx]
-    context = row["BERT_Context"]
-    answer = row["Cleaned_Body_answer"]
-    start_pos = row["Start_Positions"]
-    end_pos = row["End_Positions"]
-    
-    context_tokens = tokenizer.tokenize(context)
-    extracted_answer_tokens = context_tokens[start_pos : end_pos + 1]
-    extracted_answer = tokenizer.convert_tokens_to_string(extracted_answer_tokens)
-```
-
-#### Printing Results for Manual Verification
-```python
-    print(f"Row:  {row_idx}")
-    print(f"Context:  {' '.join(context_tokens)}")
-    print(f"Answer:  {' '.join(tokenizer.tokenize(answer))}")
-    print(f"Extracted Answer:  {' '.join(extracted_answer_tokens)}")
-    print("-----")
-```
-
-#### Execution
-To execute the script, simply run it in a Python environment that has access to the required libraries and the preprocessed data. The output will be printed to the console for manual verification.
-
-## BERT Model Training Notebook
-
-### Overview
-This Jupyter notebook is designed to fine-tune a BERT model for Question Answering tasks. It involves loading a pre-trained BERT model, preparing the data, and training the model with the possibility of using mixed precision training. The notebook is structured to run on Google Colab and utilizes Google Drive for storing datasets and the fine-tuned model.
+This notebook is designed to fine-tune a GPT2 model for Question Answering tasks. The original code is from [Huggingface](https://github.com/huggingface/transformers/blob/main/examples/pytorch/language-modeling/run_clm.py/) language modelling. It involves loading a pre-trained GPT2 model, preparing the data, and training the model with the possibility of using mixed precision training. The notebook is structured to run on Google Colab and utilizes Google Drive for storing datasets and the fine-tuned model.
 
 #### Installation of Libraries
 ```shell
-!pip install -q transformers
+!pip install git+https://github.com/huggingface/transformers
+!pip install torch datasets evaluate
+!pip install transformers[torch]
 ```
 
 #### Importing Libraries and Modules
 ```python
+# Importing necessary libraries and modules
 import logging
-import pandas as pd
-import torch
-from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
-from transformers import BertTokenizer, BertForQuestionAnswering, AdamW
-from tqdm import tqdm
-from torch.cuda.amp import GradScaler, autocast
-from google.colab import drive
+import math
 import os
+import sys
+import warnings
+from dataclasses import dataclass, field
+from itertools import chain
+from typing import Optional
+
+import datasets
+import evaluate
+import torch
+from datasets import load_dataset
+
+import transformers
+from transformers import (
+    CONFIG_MAPPING,
+    MODEL_FOR_CAUSAL_LM_MAPPING,
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    HfArgumentParser,
+    Trainer,
+    TrainingArguments,
+    default_data_collator,
+    is_torch_tpu_available,
+    set_seed,
+)
+from transformers.testing_utils import CaptureLogger
+from transformers.trainer_utils import get_last_checkpoint
+from transformers.utils import check_min_version, send_example_telemetry
+from transformers.utils.versions import require_version
+from google.colab import drive
 ```
 
-#### Mounting Google Drive and Configuring Logging
+#### Mounting Google Drive and logger
 ```python
+# Mount Google Drive
 drive.mount('/content/drive')
-os.chdir('/content/drive/My Drive/Dataspeak')
 
-logging.basicConfig(
-    filename="bert_training_log.log",
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+# Navigate to the directory containing your data if it's in your drive
+os.chdir('/content/drive/My Drive/DS')
+```
+
+#### Version Checks and Logger Setup
+```python
+# Will error if the minimal version of Transformers is not installed. Remove at your own risk.
+check_min_version("4.34.0.dev0")
+
+require_version(
+    "datasets>=1.8.0",
+    "To fix: pip install -r examples/pytorch/language-modeling/requirements.txt",
 )
+
+logger = logging.getLogger(__name__)
 ```
 
-#### Loading Model, Tokenizer, and Preprocessed Data
-```python
-model_name = "bert-large-uncased-whole-word-masking-finetuned-squad"
-tokenizer = BertTokenizer.from_pretrained(model_name)
-model = BertForQuestionAnswering.from_pretrained(model_name)
 
-preprocessed_data_path = "preprocessed_data.csv"
-data = pd.read_csv(preprocessed_data_path)
+#### Model Configuration Classes
+```python
+MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
+MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 ```
 
-#### Data Preparation and DataLoader Initialization
+#### ModelArguments Class
+- A data class that contains arguments related to the model, configuration, tokenizer, and other related parameters.
+- Handles model initialization, whether from a checkpoint or from scratch, and manages other model-related settings.
 ```python
-# Split the data into training and validation sets
-train_data, val_data = train_test_split(data, test_size=0.1, random_state=42)
+@dataclass
+class ModelArguments:
+    """
+    Arguments pertaining to which model/config/tokenizer we are going to fine-tune, or train from scratch.
+    """
 
-# Initialize GradScaler for mixed precision training
-scaler = GradScaler()
-
-class QADataset(Dataset):
-    def __init__(self, questions, contexts, start_positions, end_positions):
-        self.questions = questions
-        self.contexts = contexts
-        self.start_positions = start_positions
-        self.end_positions = end_positions
-
-    def __len__(self):
-        return len(self.questions)
-
-    def __getitem__(self, idx):
-        question = self.questions[idx]
-        context = self.contexts[idx]
-        if not isinstance(question, str) or not isinstance(context, str):
-            logging.error(
-                f"Invalid types - Question: {type(question)}, Context: {type(context)} at index {idx}"
+    model_name_or_path: Optional[str] = field(
+        default='None',
+        metadata={
+            "help": (
+                "The model checkpoint for weights initialization. Don't set if you want to train a model from scratch."
             )
-            return None
-        try:
-            inputs = tokenizer(
-                question,
-                context,
-                return_tensors="pt",
-                max_length=512,
-                truncation=True,
-                padding="max_length",  # Ensure sequences are padded to max_length
+        },
+    )
+    model_type: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "If training from scratch, pass a model type from the list: "
+            + ", ".join(MODEL_TYPES)
+        },
+    )
+    config_overrides: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Override some existing default config settings when a model is trained from scratch. Example: "
+                "n_embd=10,resid_pdrop=0.2,scale_attn_weights=false,summary_type=cls_index"
             )
-        except Exception as e:
-            logging.error(f"Error in tokenization at index {idx}: {e}")
-            return None
+        },
+    )
+    config_name: Optional[str] = field(
+        default='None',
+        metadata={
+            "help": "Pretrained config name or path if not the same as model_name"
+        },
+    )
+    tokenizer_name: Optional[str] = field(
+        default='None',
+        metadata={
+            "help": "Pretrained tokenizer name or path if not the same as model_name"
+        },
+    )
+    cache_dir: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Where do you want to store the pretrained models downloaded from huggingface.co"
+        },
+    )
+    use_fast_tokenizer: bool = field(
+        default=True,
+        metadata={
+            "help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."
+        },
+    )
+    model_revision: str = field(
+        default="main",
+        metadata={
+            "help": "The specific model version to use (can be a branch name, tag name or commit id)."
+        },
+    )
+    token: str = field(
+        default=None,
+        metadata={
+            "help": (
+                "The token to use as HTTP bearer authorization for remote files. If not specified, will use the token "
+                "generated when running `huggingface-cli login` (stored in `~/.huggingface`)."
+            )
+        },
+    )
+    use_auth_token: bool = field(
+        default=None,
+        metadata={
+            "help": "The `use_auth_token` argument is deprecated and will be removed in v4.34. Please use `token`."
+        },
+    )
+    trust_remote_code: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether or not to allow for custom models defined on the Hub in their own modeling files. This option"
+                "should only be set to `True` for repositories you trust and in which you have read the code, as it will"
+                "execute code present on the Hub on your local machine."
+            )
+        },
+    )
+    torch_dtype: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Override the default `torch.dtype` and load the model under this dtype. If `auto` is passed, the "
+                "dtype will be automatically derived from the model's weights."
+            ),
+            "choices": ["auto", "bfloat16", "float16", "float32"],
+        },
+    )
+    low_cpu_mem_usage: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "It is an option to create the model as an empty shell, then only materialize its parameters when the pretrained weights are loaded."
+                "set True will benefit LLM loading time and RAM consumption."
+            )
+        },
+    )
 
-        start_position = self.start_positions[idx]
-        end_position = self.end_positions[idx]
+    def __post_init__(self):
+        if self.config_overrides is not None and (
+            self.config_name is not None or self.model_name_or_path is not None
+        ):
+            raise ValueError(
+                "--config_overrides can't be used in combination with --config_name or --model_name_or_path"
+            )
+```
 
-        # Handle cases where model mispredicts and start_position is after end_position
-        if start_position > end_position:
-            start_position, end_position = end_position, start_position
+#### DataTrainingArguments Class
+- A data class that contains arguments related to data input for training and evaluation.
+- Manages dataset names, file paths, and other data-related settings.
+```python
+@dataclass
+class DataTrainingArguments:
+    """
+    Arguments pertaining to what data we are going to input our model for training and eval.
+    """
 
-        return {
-            "input_ids": inputs["input_ids"].squeeze(),
-            "attention_mask": inputs["attention_mask"].squeeze(),
-            "start_positions": torch.tensor(start_position, dtype=torch.long),
-            "end_positions": torch.tensor(end_position, dtype=torch.long),
+    dataset_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "The name of the dataset to use (via the datasets library)."},
+    )
+    dataset_config_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "The configuration name of the dataset to use (via the datasets library)."
+        },
+    )
+    train_file: Optional[str] = field(
+        default=None, metadata={"help": "The input training data file (a text file)."}
+    )
+    validation_file: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "An optional input evaluation data file to evaluate the perplexity on (a text file)."
+        },
+    )
+    max_train_samples: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "For debugging purposes or quicker training, truncate the number of training examples to this "
+                "value if set."
+            )
+        },
+    )
+    max_eval_samples: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "For debugging purposes or quicker training, truncate the number of evaluation examples to this "
+                "value if set."
+            )
+        },
+    )
+    streaming: bool = field(default=False, metadata={"help": "Enable streaming mode"})
+    block_size: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional input sequence length after tokenization. "
+                "The training dataset will be truncated in block of this size for training. "
+                "Default to the model max input length for single sentence inputs (take into account special tokens)."
+            )
+        },
+    )
+    overwrite_cache: bool = field(
+        default=False,
+        metadata={"help": "Overwrite the cached training and evaluation sets"},
+    )
+    validation_split_percentage: Optional[int] = field(
+        default=5,
+        metadata={
+            "help": "The percentage of the train set used as validation set in case there's no validation split"
+        },
+    )
+    preprocessing_num_workers: Optional[int] = field(
+        default=None,
+        metadata={"help": "The number of processes to use for the preprocessing."},
+    )
+    keep_linebreaks: bool = field(
+        default=True,
+        metadata={"help": "Whether to keep line breaks when using TXT files or not."},
+    )
+
+    def __post_init__(self):
+        if self.streaming:
+            require_version(
+                "datasets>=2.0.0", "The streaming feature requires `datasets>=2.0.0`"
+            )
+
+        if (
+            self.dataset_name is None
+            and self.train_file is None
+            and self.validation_file is None
+        ):
+            raise ValueError(
+                "Need either a dataset name or a training/validation file."
+            )
+        else:
+            if self.train_file is not None:
+                extension = self.train_file.split(".")[-1]
+                assert extension in [
+                    "csv",
+                    "json",
+                    "txt",
+                ], "`train_file` should be a csv, a json or a txt file."
+            if self.validation_file is not None:
+                extension = self.validation_file.split(".")[-1]
+                assert extension in [
+                    "csv",
+                    "json",
+                    "txt",
+                ], "`validation_file` should be a csv, a json or a txt file."
+```
+
+#### Main Function Part 1: Argument Parsing and Setup
+- The main function where training and evaluation will be executed.
+- Initializes argument classes and sets up model and data arguments with specified or default values.
+```python
+def main():
+    # See all possible arguments in src/transformers/training_args.py
+    # or by passing the --help flag to this script.
+    # We now keep distinct sets of args, for a cleaner separation of concerns.
+
+    # parser = HfArgumentParser(
+    #     (ModelArguments, DataTrainingArguments, TrainingArguments)
+    # )
+    # if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+    #     # If we pass only one argument to the script and it's the path to a json file,
+    #     # let's parse it to get our arguments.
+    #     model_args, data_args, training_args = parser.parse_json_file(
+    #         json_file=os.path.abspath(sys.argv[1])
+    #     )
+    # else:
+    #     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # if model_args.use_auth_token is not None:
+    #     warnings.warn(
+    #         "The `use_auth_token` argument is deprecated and will be removed in v4.34.",
+    #         FutureWarning,
+    #     )
+    #     if model_args.token is not None:
+    #         raise ValueError(
+    #             "`token` and `use_auth_token` are both specified. Please set only the argument `token`."
+    #         )
+    #     model_args.token = model_args.use_auth_token
+
+        # Manually assign the arguments
+    model_args = ModelArguments(
+        model_name_or_path='model_tuned3',  # or the path to your model
+        # ... any other ModelArguments you want to set ...
+    )
+
+    data_args = DataTrainingArguments(
+        train_file='small_preprocessed_data.txt',  # replace with the path to your training file
+        # ... any other DataTrainingArguments you want to set ...
+    )
+
+    training_args = TrainingArguments(
+        output_dir='model_tuned4',  # replace with the path to your output directory
+        do_train=True,
+        do_eval=True,
+        per_device_train_batch_size=12,
+        save_total_limit=2,
+        num_train_epochs=3,
+        fp16=True,  # Enable mixed-precision training
+        dataloader_num_workers=120,
+        gradient_accumulation_steps=2,
+        learning_rate=0.00001,
+        # resume_from_checkpoint= 'model_tuned2/checkpoint-47000',
+        # ... any other TrainingArguments you want to set ...
+    )
+
+    # The rest of the code remains unchanged
+    if model_args.use_auth_token is not None:
+        warnings.warn(
+            "The `use_auth_token` argument is deprecated and will be removed in v4.34.",
+            FutureWarning,
+        )
+        if model_args.token is not None:
+            raise ValueError(
+                "`token` and `use_auth_token` are both specified. Please set only the argument `token`."
+            )
+        model_args.token = model_args.use_auth_token
+
+    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
+    # information sent is the one passed as arguments along with your Python/PyTorch versions.
+    send_example_telemetry("run_clm", model_args, data_args)
+
+    # Setup logging
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    if training_args.should_log:
+        # The default of training_args.log_level is passive, so we set log level at info here to have that default.
+        transformers.utils.logging.set_verbosity_info()
+
+    log_level = training_args.get_process_log_level()
+    logger.setLevel(log_level)
+    datasets.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.enable_default_handler()
+    transformers.utils.logging.enable_explicit_format()
+
+    # Log on each process the small summary:
+    logger.warning(
+        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
+        + f"distributed training: {training_args.parallel_mode.value == 'distributed'}, 16-bits training: {training_args.fp16}"
+    )
+    logger.info(f"Training/evaluation parameters {training_args}")
+
+    # Detecting last checkpoint.
+    last_checkpoint = None
+    if (
+        os.path.isdir(training_args.output_dir)
+        and training_args.do_train
+        and not training_args.overwrite_output_dir
+    ):
+        last_checkpoint = get_last_checkpoint(training_args.output_dir)
+        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
+            raise ValueError(
+                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
+                "Use --overwrite_output_dir to overcome."
+            )
+        elif (
+            last_checkpoint is not None and training_args.resume_from_checkpoint is None
+        ):
+            logger.info(
+                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
+                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
+            )
+
+    # Set seed before initializing model.
+    set_seed(training_args.seed)
+
+```
+
+
+#### Main Function Part 2: Dataset Loading and Preprocessing
+- Loads and preprocesses datasets either from the Hugging Face Hub or from provided file paths.
+- Tokenizes the text data and handles any tokenization-related logging.
+```python
+# Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
+    # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
+    # (the dataset will be downloaded automatically from the datasets Hub).
+    #
+    # For CSV/JSON files, this script will use the column called 'text' or the first column if no column called
+    # 'text' is found. You can easily tweak this behavior (see below).
+    #
+    # In distributed training, the load_dataset function guarantee that only one local process can concurrently
+    # download the dataset.
+    if data_args.dataset_name is not None:
+        # Downloading and loading a dataset from the hub.
+        raw_datasets = load_dataset(
+            data_args.dataset_name,
+            data_args.dataset_config_name,
+            cache_dir=model_args.cache_dir,
+            token=model_args.token,
+            streaming=data_args.streaming,
+        )
+        if "validation" not in raw_datasets.keys():
+            raw_datasets["validation"] = load_dataset(
+                data_args.dataset_name,
+                data_args.dataset_config_name,
+                split=f"train[:{data_args.validation_split_percentage}%]",
+                cache_dir=model_args.cache_dir,
+                token=model_args.token,
+                streaming=data_args.streaming,
+            )
+            raw_datasets["train"] = load_dataset(
+                data_args.dataset_name,
+                data_args.dataset_config_name,
+                split=f"train[{data_args.validation_split_percentage}%:]",
+                cache_dir=model_args.cache_dir,
+                token=model_args.token,
+                streaming=data_args.streaming,
+            )
+    else:
+        data_files = {}
+        dataset_args = {}
+        if data_args.train_file is not None:
+            data_files["train"] = data_args.train_file
+        if data_args.validation_file is not None:
+            data_files["validation"] = data_args.validation_file
+        extension = (
+            data_args.train_file.split(".")[-1]
+            if data_args.train_file is not None
+            else data_args.validation_file.split(".")[-1]
+        )
+        if extension == "txt":
+            extension = "text"
+            dataset_args["keep_linebreaks"] = data_args.keep_linebreaks
+        raw_datasets = load_dataset(
+            extension,
+            data_files=data_files,
+            cache_dir=model_args.cache_dir,
+            token=model_args.token,
+            **dataset_args,
+        )
+        # If no validation data is there, validation_split_percentage will be used to divide the dataset.
+        if "validation" not in raw_datasets.keys():
+            raw_datasets["validation"] = load_dataset(
+                extension,
+                data_files=data_files,
+                split=f"train[:{data_args.validation_split_percentage}%]",
+                cache_dir=model_args.cache_dir,
+                token=model_args.token,
+                **dataset_args,
+            )
+            raw_datasets["train"] = load_dataset(
+                extension,
+                data_files=data_files,
+                split=f"train[{data_args.validation_split_percentage}%:]",
+                cache_dir=model_args.cache_dir,
+                token=model_args.token,
+                **dataset_args,
+            )
+
+    # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
+    # https://huggingface.co/docs/datasets/loading_datasets.html.
+
+    # Load pretrained model and tokenizer
+    #
+    # Distributed training:
+    # The .from_pretrained methods guarantee that only one local process can concurrently
+    # download model & vocab.
+
+    config_kwargs = {
+        "cache_dir": model_args.cache_dir,
+        "revision": model_args.model_revision,
+        "token": model_args.token,
+        "trust_remote_code": model_args.trust_remote_code,
+    }
+```
+
+#### Main Function Part 3: Model and Tokenizer Initialization
+- Initializes the model and tokenizer either from pretrained versions or from scratch.
+- Handles configuration and tokenization for the model.
+```python
+if model_args.config_name:
+        config = AutoConfig.from_pretrained(model_args.config_name, **config_kwargs)
+    elif model_args.model_name_or_path:
+        config = AutoConfig.from_pretrained(
+            model_args.model_name_or_path, **config_kwargs
+        )
+    else:
+        config = CONFIG_MAPPING[model_args.model_type]()
+        logger.warning("You are instantiating a new config instance from scratch.")
+        if model_args.config_overrides is not None:
+            logger.info(f"Overriding config: {model_args.config_overrides}")
+            config.update_from_string(model_args.config_overrides)
+            logger.info(f"New config: {config}")
+
+    tokenizer_kwargs = {
+        "cache_dir": model_args.cache_dir,
+        "use_fast": model_args.use_fast_tokenizer,
+        "revision": model_args.model_revision,
+        "token": model_args.token,
+        "trust_remote_code": model_args.trust_remote_code,
+    }
+    if model_args.tokenizer_name:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.tokenizer_name, **tokenizer_kwargs
+        )
+    elif model_args.model_name_or_path:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.model_name_or_path, **tokenizer_kwargs
+        )
+    else:
+        raise ValueError(
+            "You are instantiating a new tokenizer from scratch. This is not supported by this script."
+            "You can do it from another script, save it, and load it from here, using --tokenizer_name."
+        )
+
+    if model_args.model_name_or_path:
+        torch_dtype = (
+            model_args.torch_dtype
+            if model_args.torch_dtype in ["auto", None]
+            else getattr(torch, model_args.torch_dtype)
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_args.model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            token=model_args.token,
+            trust_remote_code=model_args.trust_remote_code,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=model_args.low_cpu_mem_usage,
+        )
+    else:
+        model = AutoModelForCausalLM.from_config(
+            config, trust_remote_code=model_args.trust_remote_code
+        )
+        n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
+        logger.info(
+            f"Training new model from scratch - Total size={n_params/2**20:.2f}M params"
+        )
+
+    # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
+    # on a small vocab and want a smaller embedding size, remove this test.
+    embedding_size = model.get_input_embeddings().weight.shape[0]
+    if len(tokenizer) > embedding_size:
+        model.resize_token_embeddings(len(tokenizer))
+
+    # Preprocessing the datasets.
+    # First we tokenize all the texts.
+    if training_args.do_train:
+        column_names = list(raw_datasets["train"].features)
+    else:
+        column_names = list(raw_datasets["validation"].features)
+    text_column_name = "text" if "text" in column_names else column_names[0]
+
+    # since this will be pickled to avoid _LazyModule error in Hasher force logger loading before tokenize_function
+    tok_logger = transformers.utils.logging.get_logger(
+        "transformers.tokenization_utils_base"
+    )
+
+    def tokenize_function(examples):
+        with CaptureLogger(tok_logger) as cl:
+            output = tokenizer(examples[text_column_name])
+        # clm input could be much much longer than block_size
+        if "Token indices sequence length is longer than the" in cl.out:
+            tok_logger.warning(
+                "^^^^^^^^^^^^^^^^ Please ignore the warning above - this long input will be chunked into smaller bits"
+                " before being passed to the model."
+            )
+        return output
+
+    with training_args.main_process_first(desc="dataset map tokenization"):
+        if not data_args.streaming:
+            tokenized_datasets = raw_datasets.map(
+                tokenize_function,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                remove_columns=column_names,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc="Running tokenizer on dataset",
+            )
+        else:
+            tokenized_datasets = raw_datasets.map(
+                tokenize_function,
+                batched=True,
+                remove_columns=column_names,
+            )
+
+    if data_args.block_size is None:
+        block_size = tokenizer.model_max_length
+        if block_size > 1024:
+            logger.warning(
+                "The chosen tokenizer supports a `model_max_length` that is longer than the default `block_size` value"
+                " of 1024. If you would like to use a longer `block_size` up to `tokenizer.model_max_length` you can"
+                " override this default with `--block_size xxx`."
+            )
+            block_size = 1024
+    else:
+        if data_args.block_size > tokenizer.model_max_length:
+            logger.warning(
+                f"The block_size passed ({data_args.block_size}) is larger than the maximum length for the model"
+                f"({tokenizer.model_max_length}). Using block_size={tokenizer.model_max_length}."
+            )
+        block_size = min(data_args.block_size, tokenizer.model_max_length)
+```
+
+
+#### Main Function Part 5: Training Setup and Execution
+- Sets up and executes the training and evaluation of the model.
+- Manages training arguments, data collation, and initializes the Trainer class.
+```python
+# Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
+    def group_texts(examples):
+        # Concatenate all texts.
+        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
+        total_length = len(concatenated_examples[list(examples.keys())[0]])
+        # We drop the small remainder, and if the total_length < block_size  we exclude this batch and return an empty dict.
+        # We could add padding if the model supported it instead of this drop, you can customize this part to your needs.
+        total_length = (total_length // block_size) * block_size
+        # Split by chunks of max_len.
+        result = {
+            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
+            for k, t in concatenated_examples.items()
         }
+        result["labels"] = result["input_ids"].copy()
+        return result
 
+    # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a remainder
+    # for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value might be slower
+    # to preprocess.
+    #
+    # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
+    # https://huggingface.co/docs/datasets/process#map
 
-# Define your custom collate function here
-def custom_collate(batch):
-    batch = list(filter(lambda x: x is not None, batch))
-    if len(batch) == 0:
-        return None  # Return None if all items are filtered out
-    return torch.utils.data.dataloader.default_collate(batch)
+    with training_args.main_process_first(desc="grouping texts together"):
+        if not data_args.streaming:
+            lm_datasets = tokenized_datasets.map(
+                group_texts,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc=f"Grouping texts in chunks of {block_size}",
+            )
+        else:
+            lm_datasets = tokenized_datasets.map(
+                group_texts,
+                batched=True,
+            )
 
+    if training_args.do_train:
+        if "train" not in tokenized_datasets:
+            raise ValueError("--do_train requires a train dataset")
+        train_dataset = lm_datasets["train"]
+        if data_args.max_train_samples is not None:
+            max_train_samples = min(len(train_dataset), data_args.max_train_samples)
+            train_dataset = train_dataset.select(range(max_train_samples))
 
-# Initialize the training and validation datasets
-train_dataset = QADataset(
-    questions=train_data["Cleaned_Title"].tolist(),
-    contexts=train_data["BERT_Context"].tolist(),
-    start_positions=train_data["Start_Positions"].astype(int).tolist(),
-    end_positions=train_data["End_Positions"].astype(int).tolist(),
-)
+    if training_args.do_eval:
+        if "validation" not in tokenized_datasets:
+            raise ValueError("--do_eval requires a validation dataset")
+        eval_dataset = lm_datasets["validation"]
+        if data_args.max_eval_samples is not None:
+            max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
+            eval_dataset = eval_dataset.select(range(max_eval_samples))
 
-val_dataset = QADataset(
-    questions=val_data["Cleaned_Title"].tolist(),
-    contexts=val_data["BERT_Context"].tolist(),
-    start_positions=val_data["Start_Positions"].astype(int).tolist(),
-    end_positions=val_data["End_Positions"].astype(int).tolist(),
-)
+        def preprocess_logits_for_metrics(logits, labels):
+            if isinstance(logits, tuple):
+                # Depending on the model and config, logits may contain extra tensors,
+                # like past_key_values, but logits always come first
+                logits = logits[0]
+            return logits.argmax(dim=-1)
 
-# Modify the DataLoader instantiation with the custom collate function
-batch_size = 5
-train_dataloader = DataLoader(
-    train_dataset, batch_size=batch_size, collate_fn=custom_collate, shuffle=True
-)
-val_dataloader = DataLoader(
-    val_dataset, batch_size=batch_size, collate_fn=custom_collate, shuffle=False
-)
+        metric = evaluate.load("accuracy")
+
+        def compute_metrics(eval_preds):
+            preds, labels = eval_preds
+            # preds have the same shape as the labels, after the argmax(-1) has been calculated
+            # by preprocess_logits_for_metrics but we need to shift the labels
+            labels = labels[:, 1:].reshape(-1)
+            preds = preds[:, :-1].reshape(-1)
+            return metric.compute(predictions=preds, references=labels)
+
 ```
 
-#### Model Training
+#### Main Function Part 6: Model Training and Evaluation
+- Initializes the Trainer class with specified arguments and data.
+- Executes model training and evaluation based on provided datasets and arguments.
 ```python
-# Setup the optimizer
-optimizer = AdamW(model.parameters(), lr=0.9)
+# Initialize our Trainer
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset if training_args.do_train else None,
+        eval_dataset=eval_dataset if training_args.do_eval else None,
+        tokenizer=tokenizer,
+        # Data collator will default to DataCollatorWithPadding, so we change it.
+        data_collator=default_data_collator,
+        compute_metrics=compute_metrics
+        if training_args.do_eval and not is_torch_tpu_available()
+        else None,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics
+        if training_args.do_eval and not is_torch_tpu_available()
+        else None,
+    )
 
-# Fine-tune the model
-num_epochs = 1
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Use GPU if available
-model.to(device)
+    # Training
+    if training_args.do_train:
+        checkpoint = None
+        if training_args.resume_from_checkpoint is not None:
+            checkpoint = training_args.resume_from_checkpoint
+        elif last_checkpoint is not None:
+            checkpoint = last_checkpoint
+        train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        trainer.save_model()  # Saves the tokenizer too for easy upload
 
-# Initialize the progress bar
-progress_bar = tqdm(total=num_epochs * len(train_dataloader), desc="Training Progress")
+        metrics = train_result.metrics
 
-# Gradient accumulation steps
-gradient_accumulation_steps = 4  # Adjust if necessary
+        max_train_samples = (
+            data_args.max_train_samples
+            if data_args.max_train_samples is not None
+            else len(train_dataset)
+        )
+        metrics["train_samples"] = min(max_train_samples, len(train_dataset))
 
-best_val_loss = float('inf')
-patience = 2  # Number of epochs with no improvement to wait
-no_improve_epoch = 0
+        trainer.log_metrics("train", metrics)
+        trainer.save_metrics("train", metrics)
+        trainer.save_state()
 
-for epoch in range(num_epochs):
-    model.train()
-    total_loss = 0
-    optimizer.zero_grad()
-    for step, batch in enumerate(train_dataloader):
-        batch = {k: v.to(device) for k, v in batch.items()}
-        
-        # Use autocast to enable mixed precision training
-        with autocast():
-            outputs = model(**batch)
-            loss = outputs.loss
-            if loss is not None:
-                loss = loss / gradient_accumulation_steps  # Normalize the loss
-        
-        # Scale the loss using GradScaler and call backward
-        scaler.scale(loss).backward()
-        total_loss += scaler.scale(loss).item()
-        
-        if (step + 1) % gradient_accumulation_steps == 0:
-            # Perform a step using GradScaler
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-            progress_bar.update(gradient_accumulation_steps)
-            logging.info(f"Processed batch {total_loss} in epoch {epoch + 1}")
+    # Evaluation
+    if training_args.do_eval:
+        logger.info("*** Evaluate ***")
 
-    logging.info(f"Epoch {epoch+1}, Training Loss: {total_loss/len(train_dataloader)}")
+        metrics = trainer.evaluate()
 
-    model.eval()
-    val_loss = 0
-    with torch.no_grad():
-        for batch in val_dataloader:
-            batch = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**batch)
-            loss = outputs.loss
-            val_loss += loss.item()
+        max_eval_samples = (
+            data_args.max_eval_samples
+            if data_args.max_eval_samples is not None
+            else len(eval_dataset)
+        )
+        metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
+        try:
+            perplexity = math.exp(metrics["eval_loss"])
+        except OverflowError:
+            perplexity = float("inf")
+        metrics["perplexity"] = perplexity
 
-    logging.info(f"Epoch {epoch+1}, Validation Loss: {val_loss/len(val_dataloader)}")
+        trainer.log_metrics("eval", metrics)
+        trainer.save_metrics("eval", metrics)
 
-progress_bar.close()
+    kwargs = {
+        "finetuned_from": model_args.model_name_or_path,
+        "tasks": "text-generation",
+    }
+    if data_args.dataset_name is not None:
+        kwargs["dataset_tags"] = data_args.dataset_name
+        if data_args.dataset_config_name is not None:
+            kwargs["dataset_args"] = data_args.dataset_config_name
+            kwargs[
+                "dataset"
+            ] = f"{data_args.dataset_name} {data_args.dataset_config_name}"
+        else:
+            kwargs["dataset"] = data_args.dataset_name
 ```
 
-#### Model Saving
+####  Main Function Part 7: Model Saving
+- Handles saving the model to the Hugging Face Hub or locally.
+- Manages different saving strategies like saving the last, best, or all checkpoints.
 ```python
-model.save_pretrained("/content/drive/My Drive/Dataspeak/fine_tuned_bert")
-tokenizer.save_pretrained("/content/drive/My Drive/Dataspeak/fine_tuned_bert")
+if training_args.push_to_hub:
+        trainer.push_to_hub(**kwargs)
+    else:
+        trainer.create_model_card(**kwargs)
+
+
+def _mp_fn(index):
+    # For xla_spawn (TPUs)
+    main()
+
+
+if __name__ == "__main__":
+
+    main()
 ```
+
 
 #### Execution
 To execute the notebook, upload it to Google Colab, and run the cells in sequence. Ensure that your Google Drive is mounted correctly and that the paths to the datasets and the save location for the model are correctly specified.
